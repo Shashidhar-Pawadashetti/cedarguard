@@ -1,0 +1,30 @@
+{
+  "CedarGuard": {
+    "entityTypes": {
+      "S3Bucket": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "blockPublicAcls": { "type": "Boolean" },
+            "blockPublicPolicy": { "type": "Boolean" },
+            "acl": { "type": "String" }
+          }
+        }
+      },
+      "Scanner": {
+        "shape": {
+          "type": "Record",
+          "attributes": {}
+        }
+      }
+    },
+    "actions": {
+      "EvaluateS3Public": {
+        "appliesTo": {
+          "principalTypes": ["Scanner"],
+          "resourceTypes": ["S3Bucket"]
+        }
+      }
+    }
+  }
+}

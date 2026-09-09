@@ -1,0 +1,25 @@
+[
+  {
+    "uid": { "type": "CedarGuard::Scanner", "id": "local_scanner" },
+    "attrs": {},
+    "parents": []
+  },
+  {
+    "uid": { "type": "CedarGuard::S3Bucket", "id": "PublicBucket" },
+    "attrs": {
+      "blockPublicAcls": false,
+      "blockPublicPolicy": false,
+      "acl": "public-read"
+    },
+    "parents": []
+  },
+  {
+    "uid": { "type": "CedarGuard::S3Bucket", "id": "SecureBucket" },
+    "attrs": {
+      "blockPublicAcls": true,
+      "blockPublicPolicy": true,
+      "acl": "private"
+    },
+    "parents": []
+  }
+]

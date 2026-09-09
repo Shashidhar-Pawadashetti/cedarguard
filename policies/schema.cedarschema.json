@@ -1,0 +1,76 @@
+{
+  "CedarGuard": {
+    "entityTypes": {
+      "S3Bucket": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "blockPublicAcls": { "type": "Boolean" },
+            "blockPublicPolicy": { "type": "Boolean" },
+            "acl": { "type": "String" }
+          }
+        }
+      },
+      "IamPolicy": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "hasWildcardAction": { "type": "Boolean" },
+            "hasWildcardResource": { "type": "Boolean" },
+            "hasMfaCondition": { "type": "Boolean" },
+            "isSensitiveAction": { "type": "Boolean" }
+          }
+        }
+      },
+      "SecurityGroup": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "openIngressPorts": {
+              "type": "Set",
+              "element": { "type": "Long" }
+            }
+          }
+        }
+      },
+      "Scanner": {
+        "shape": {
+          "type": "Record",
+          "attributes": {}
+        }
+      }
+    },
+    "actions": {
+      "EvaluateS3Public": {
+        "appliesTo": {
+          "principalTypes": ["Scanner"],
+          "resourceTypes": ["S3Bucket"]
+        }
+      },
+      "EvaluateIamWildcardAction": {
+        "appliesTo": {
+          "principalTypes": ["Scanner"],
+          "resourceTypes": ["IamPolicy"]
+        }
+      },
+      "EvaluateIamWildcardResource": {
+        "appliesTo": {
+          "principalTypes": ["Scanner"],
+          "resourceTypes": ["IamPolicy"]
+        }
+      },
+      "EvaluateSgOpenIngress": {
+        "appliesTo": {
+          "principalTypes": ["Scanner"],
+          "resourceTypes": ["SecurityGroup"]
+        }
+      },
+      "EvaluateMfaCondition": {
+        "appliesTo": {
+          "principalTypes": ["Scanner"],
+          "resourceTypes": ["IamPolicy"]
+        }
+      }
+    }
+  }
+}
