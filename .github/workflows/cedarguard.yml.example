@@ -1,0 +1,36 @@
+# Example: drop this file at .github/workflows/cedarguard.yml in any repo
+# that wants CedarGuard PR checks (including this repo, dogfooding its own
+# action). Uses `./ci/github_action` as a local action since this workflow
+# lives in the same repo as the action; an external consumer would instead
+# reference `Shashidhar-Pawadashetti/cedarguard/ci/github_action@main`.
+#
+# fetch-depth: 0 is required so the base-branch comparison in action.yml can
+# `git worktree add` the PR's base commit — a shallow clone won't have it.
+
+name: CedarGuard
+
+on:
+  pull_request:
+    paths:
+      - '**.yaml'
+      - '**.yml'
+      - '**.json'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run CedarGuard
+        uses: ./ci/github_action
+        with:
+          path: demo-repo/broken
+          fail-on: high
+          github-token: ${{ secrets.GITHUB_TOKEN }}

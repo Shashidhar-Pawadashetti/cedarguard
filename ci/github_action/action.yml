@@ -1,5 +1,6 @@
 name: 'CedarGuard Security Scan'
-description: 'Policy-as-code security guardrail engine for IaC powered by Cedar'
+description: 'Policy-as-code security guardrail engine for IaC, powered by Cedar.'
+
 inputs:
   path:
     description: 'Path to IaC directory or file to scan'
@@ -10,8 +11,17 @@ inputs:
     required: false
     default: 'high'
   github-token:
-    description: 'GitHub token for posting PR comments'
+    description: 'GitHub token for posting PR comments (usually secrets.GITHUB_TOKEN)'
+    required: true
+  cedar-cli-version:
+    description: 'Pinned cedar-policy-cli version to install'
     required: false
+    default: '4.8.2'
+  compare-to-base:
+    description: 'On pull_request events, only report violations new vs. the base branch'
+    required: false
+    default: 'true'
+
 runs:
   using: 'composite'
   steps:
@@ -19,11 +29,83 @@ runs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    - name: Install CedarGuard
+
+    - name: Install CedarGuard dependencies
+      shell: bash
+      run: python -m pip install -r requirements.txt
+
+    # Cache the Cedar CLI cargo-install between runs so PRs don't pay a
+    # multi-minute Rust compile cost on every push.
+    - name: Cache Cedar CLI binary
+      id: cedar-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cedar
+        key: cedar-cli-${{ inputs.cedar-cli-version }}-${{ runner.os }}
+
+    - name: Install Rust toolchain
+      if: steps.cedar-cache.outputs.cache-hit != 'true'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install Cedar CLI (cedar-policy-cli)
+      if: steps.cedar-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo install cedar-policy-cli --version ${{ inputs.cedar-cli-version }} --locked
+
+    - name: Expose cedar on PATH
+      shell: bash
+      run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Verify Cedar CLI
+      shell: bash
+      run: cedar --version
+
+    - name: Run CedarGuard scan (PR / current ref)
+      id: scan
+      shell: bash
+      # Never fail the step itself on violations — exit code is captured and
+      # handled explicitly at the end, so a finding doesn't prevent the PR
+      # comment from being posted. `shell: bash` runs with `-e` by default,
+      # so `set +e` is required around the scan or the step aborts on a
+      # nonzero (violations-found) exit before we can read $?.
+      run: |
+        set +e
+        python -m cli.main scan "${{ inputs.path }}" --format json --fail-on "${{ inputs.fail-on }}" > cedarguard_pr_scan.json
+        SCAN_EXIT=$?
+        set -e
+        echo "exit_code=$SCAN_EXIT" >> "$GITHUB_OUTPUT"
+        cat cedarguard_pr_scan.json
+
+    - name: Scan base branch for comparison (pull_request only)
+      if: github.event_name == 'pull_request' && inputs.compare-to-base == 'true'
+      shell: bash
+      # Non-fatal: if the base-branch comparison fails for any reason (e.g.
+      # shallow clone missing the base SHA), fall back to reporting all PR
+      # violations rather than failing the whole action.
+      continue-on-error: true
+      run: |
+        git fetch origin "${{ github.event.pull_request.base.sha }}" --depth=1
+        git worktree add /tmp/cedarguard-base "${{ github.event.pull_request.base.sha }}"
+        cd /tmp/cedarguard-base
+        python -m pip install -q -r requirements.txt
+        python -m cli.main scan "${{ inputs.path }}" --format json --fail-on "${{ inputs.fail-on }}" \
+          > "${GITHUB_WORKSPACE}/cedarguard_base_scan.json" || true
+
+    - name: Post PR comment with findings
+      if: github.event_name == 'pull_request'
       shell: bash
       run: |
-        python -m pip install -r requirements.txt
-    - name: Run CedarGuard Scan
+        BASE_ARG=""
+        if [ -f "cedarguard_base_scan.json" ]; then
+          BASE_ARG="--base-scan-json cedarguard_base_scan.json"
+        fi
+        python ci/github_action/post_comment.py \
+          --scan-json cedarguard_pr_scan.json \
+          $BASE_ARG \
+          --repo "${{ github.repository }}" \
+          --pr-number "${{ github.event.pull_request.number }}" \
+          --token "${{ inputs.github-token }}"
+
+    - name: Fail check on blocking violations
       shell: bash
-      run: |
-        python -m cli.main scan ${{ inputs.path }} --fail-on ${{ inputs.fail-on }}
+      run: exit ${{ steps.scan.outputs.exit_code }}

@@ -12,9 +12,10 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from engine.evaluator import evaluate_resources
-from engine.irr import ScanResult, Violation
+from engine.irr import ScanResult
 from parsers.cfn_sam import parse_cfn_file, parse_directory
 
 SEVERITY_WEIGHTS = {
@@ -26,10 +27,7 @@ SEVERITY_WEIGHTS = {
 
 
 def _supports_unicode() -> bool:
-    """Check if stdout can encode Unicode symbols."""
-    import os
-    if os.environ.get("NO_COLOR"):
-        return False
+    """Check if stdout can encode Unicode symbols. Independent of color support."""
     try:
         encoding = getattr(sys.stdout, "encoding", "") or ""
         return encoding.lower() in ("utf-8", "utf8", "utf-8-sig")
@@ -37,15 +35,63 @@ def _supports_unicode() -> bool:
         return False
 
 
+def _supports_color() -> bool:
+    """Check if stdout is a real TTY and NO_COLOR is not set.
+
+    Per docs/05-ui-ux-spec.md §7: CLI must degrade to plain ASCII/no-color when
+    NO_COLOR is set or output isn't a TTY (e.g. piped to a file or CI log parser).
+    """
+    import os
+
+    if os.environ.get("NO_COLOR"):
+        return False
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+class _Ansi:
+    """ANSI color codes, applied only when _supports_color() is True."""
+
+    RESET = "\033[0m"
+    RED = "\033[31m"
+    BOLD_RED = "\033[1;31m"
+    YELLOW = "\033[33m"
+    BOLD_YELLOW = "\033[1;33m"
+    CYAN = "\033[36m"
+    GREEN = "\033[32m"
+    DIM = "\033[2m"
+
+
+SEVERITY_COLOR = {
+    "CRITICAL": _Ansi.BOLD_RED,
+    "HIGH": _Ansi.BOLD_YELLOW,
+    "MEDIUM": _Ansi.YELLOW,
+    "LOW": _Ansi.CYAN,
+}
+
+
+def _colorize(text: str, color: str, enabled: bool) -> str:
+    """Wrap text in an ANSI color code if colorization is enabled."""
+    if not enabled:
+        return text
+    return f"{color}{text}{_Ansi.RESET}"
+
+
 def format_text_output(scan_result: ScanResult, elapsed: float = 0.0) -> str:
     """Format scan results according to docs/05-ui-ux-spec.md §2."""
     use_unicode = _supports_unicode()
+    use_color = _supports_color()
 
     # Choose symbols based on terminal capability
     X_MARK = "\u2716" if use_unicode else "X"
     CHECK = "\u2713" if use_unicode else "*"
     DOT = "\u00b7" if use_unicode else "|"
     HRULE = "\u2500" * 60 if use_unicode else "-" * 60
+
+    def sev(text: str, severity: str) -> str:
+        return _colorize(text, SEVERITY_COLOR.get(severity.upper(), ""), use_color)
 
     lines: list[str] = []
 
@@ -63,22 +109,26 @@ def format_text_output(scan_result: ScanResult, elapsed: float = 0.0) -> str:
     # Severity summary line
     parts: list[str] = []
     if n_critical:
-        parts.append(f"{X_MARK} {n_critical} CRITICAL")
+        parts.append(sev(f"{X_MARK} {n_critical} CRITICAL", "CRITICAL"))
     if n_high:
-        parts.append(f"{X_MARK} {n_high} HIGH")
+        parts.append(sev(f"{X_MARK} {n_high} HIGH", "HIGH"))
     if n_medium:
-        parts.append(f"{X_MARK} {n_medium} MEDIUM")
+        parts.append(sev(f"{X_MARK} {n_medium} MEDIUM", "MEDIUM"))
     if n_clean > 0:
-        parts.append(f"{CHECK} {n_clean} clean")
+        parts.append(_colorize(f"{CHECK} {n_clean} clean", _Ansi.GREEN, use_color))
     if parts:
         lines.append("  ".join(parts))
     else:
-        lines.append(f"{CHECK} {total} clean")
+        lines.append(_colorize(f"{CHECK} {total} clean", _Ansi.GREEN, use_color))
     lines.append("")
 
     if not scan_result.violations:
         lines.append(
-            "[PASS] No policy violations detected. IaC configuration is compliant."
+            _colorize(
+                "[PASS] No policy violations detected. IaC configuration is compliant.",
+                _Ansi.GREEN,
+                use_color,
+            )
         )
         exit_reason = "no violations"
     else:
@@ -92,7 +142,7 @@ def format_text_output(scan_result: ScanResult, elapsed: float = 0.0) -> str:
         for v in sorted_violations:
             lines.append(HRULE)
             lines.append(
-                f"[{v.severity}] {v.rule_id} {DOT} {v.file}:{v.line}"
+                sev(f"[{v.severity}] {v.rule_id}", v.severity) + f" {DOT} {v.file}:{v.line}"
             )
             lines.append(f"  Resource: {v.resource_id} ({v.resource_type})")
             lines.append("")
@@ -101,7 +151,17 @@ def format_text_output(scan_result: ScanResult, elapsed: float = 0.0) -> str:
             lines.append("  Suggested fix:")
             if v.fix_snippet:
                 for s_line in v.fix_snippet.strip().splitlines():
-                    lines.append(f"  + {s_line}")
+                    # Diff-style: '+' added lines in green, '-' removed lines in red,
+                    # per docs/05-ui-ux-spec.md §2.
+                    if s_line.strip().startswith("-"):
+                        lines.append(
+                            "  " + _colorize(f"- {s_line.lstrip('- ')}", _Ansi.RED, use_color)
+                        )
+                    else:
+                        clean = s_line.lstrip("+ ")
+                        lines.append(
+                            "  " + _colorize(f"+ {clean}", _Ansi.GREEN, use_color)
+                        )
             else:
                 lines.append(f"  {v.suggested_fix}")
 
@@ -112,8 +172,13 @@ def format_text_output(scan_result: ScanResult, elapsed: float = 0.0) -> str:
     lines.append(HRULE)
     exit_code = 1 if scan_result.violations else 0
     elapsed_str = f"{elapsed:.1f}s" if elapsed else "< 1s"
+    footer_color = _Ansi.BOLD_RED if exit_code else _Ansi.GREEN
     lines.append(
-        f"Scan complete in {elapsed_str} {DOT} exit code {exit_code} ({exit_reason})"
+        _colorize(
+            f"Scan complete in {elapsed_str} {DOT} exit code {exit_code} ({exit_reason})",
+            footer_color,
+            use_color,
+        )
     )
 
     return "\n".join(lines)
@@ -122,6 +187,71 @@ def format_text_output(scan_result: ScanResult, elapsed: float = 0.0) -> str:
 def format_json_output(scan_result: ScanResult) -> str:
     """Emit canonical JSON output schema per docs/04-data-model-api.md §4."""
     return json.dumps(scan_result.to_dict(), indent=2)
+
+
+_SARIF_SEVERITY_LEVEL = {
+    "CRITICAL": "error",
+    "HIGH": "error",
+    "MEDIUM": "warning",
+    "LOW": "note",
+}
+
+
+def format_sarif_output(scan_result: ScanResult) -> str:
+    """Emit SARIF 2.1.0 output, consumable by GitHub code-scanning.
+
+    Reference: docs/04-data-model-api.md §5 (--format sarif) and AC9.
+    """
+    # One SARIF "rule" definition per distinct rule_id seen, so the same
+    # rule appearing on multiple resources isn't redefined multiple times.
+    rules_seen: dict[str, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
+
+    for v in scan_result.violations:
+        if v.rule_id not in rules_seen:
+            rules_seen[v.rule_id] = {
+                "id": v.rule_id,
+                "shortDescription": {"text": v.rule_id.replace("-", " ").title()},
+                "fullDescription": {"text": v.explanation},
+                "helpUri": "https://github.com/Shashidhar-Pawadashetti/cedarguard",
+                "properties": {"security-severity": v.severity},
+            }
+
+        results.append(
+            {
+                "ruleId": v.rule_id,
+                "level": _SARIF_SEVERITY_LEVEL.get(v.severity.upper(), "warning"),
+                "message": {"text": f"{v.explanation} Suggested fix: {v.suggested_fix}"},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": v.file},
+                            "region": {"startLine": max(v.line, 1)},
+                        }
+                    }
+                ],
+                "properties": {"resourceId": v.resource_id, "resourceType": v.resource_type},
+            }
+        )
+
+    sarif = {
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "CedarGuard",
+                        "informationUri": "https://github.com/Shashidhar-Pawadashetti/cedarguard",
+                        "version": "0.1.0",
+                        "rules": list(rules_seen.values()),
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+    return json.dumps(sarif, indent=2)
 
 
 def run_scan(
@@ -189,6 +319,8 @@ def run_scan(
 
     if output_format == "json":
         print(format_json_output(result))
+    elif output_format == "sarif":
+        print(format_sarif_output(result))
     else:
         print(format_text_output(result, elapsed))
 
