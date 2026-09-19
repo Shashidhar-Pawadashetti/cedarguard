@@ -295,7 +295,7 @@ def run_scan(
             rule_map[short] = r.rule_id
         selected_rules = [rule_map.get(r, r) for r in rules]
 
-    violations = evaluate_resources(resources, selected_rules=selected_rules)
+    violations = evaluate_resources(resources, selected_rules=selected_rules, no_explain=no_explain)
 
     elapsed = time.monotonic() - start_time
 

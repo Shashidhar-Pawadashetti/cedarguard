@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from engine.irr import Resource, Violation
+from explain.bedrock_client import get_ai_explanation
 from explain.templates import get_explanation
 
 
@@ -88,6 +89,30 @@ def _get_policies_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "policies"
 
 
+_demo_cache_singleton: dict[str, dict[str, str]] | None = None
+
+
+def _load_demo_cache() -> dict[str, dict[str, str]]:
+    """Load explain/demo_cache.json once per process.
+
+    Missing file or malformed JSON degrades to an empty cache (i.e. every
+    lookup falls through to a live Bedrock call or the template fallback) —
+    the cache is a demo convenience, never a hard dependency.
+    Reference: docs/06-engineering-rules.md §5.
+    """
+    global _demo_cache_singleton
+    if _demo_cache_singleton is not None:
+        return _demo_cache_singleton
+
+    cache_path = Path(__file__).resolve().parent.parent / "explain" / "demo_cache.json"
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        _demo_cache_singleton = {k: v for k, v in raw.items() if not k.startswith("_")}
+    except (FileNotFoundError, json.JSONDecodeError):
+        _demo_cache_singleton = {}
+    return _demo_cache_singleton
+
+
 def _build_cedar_entities(resource: Resource, entity_type: str) -> list[dict[str, Any]]:
     """Build the Cedar entities JSON array for a resource evaluation.
 
@@ -121,6 +146,7 @@ def evaluate_single_rule(
     resource: Resource,
     rule: RuleSpec,
     cedar_bin: str | None = None,
+    no_explain: bool = False,
 ) -> Violation | None:
     """Evaluate a single IRR resource against one Cedar rule.
 
@@ -180,7 +206,21 @@ def evaluate_single_rule(
 
         # DENY means the forbid policy fired → violation found
         if "DENY" in output:
-            expl = get_explanation(rule.rule_id)
+            if no_explain:
+                # Fast path: skip Bedrock/cache entirely, template only.
+                # Cedar's decision (pass/fail) never depends on this branch —
+                # only the explanation text does (FR3, NFR6).
+                expl = get_explanation(rule.rule_id)
+            else:
+                cache_key = f"{rule.rule_id}:{resource.resource_id}"
+                expl = get_ai_explanation(
+                    rule_id=rule.rule_id,
+                    resource_id=resource.resource_id,
+                    resource_type=resource.resource_type,
+                    raw_snippet=resource.raw_snippet,
+                    demo_cache=_load_demo_cache(),
+                    cache_key=cache_key,
+                )
             return Violation(
                 rule_id=rule.rule_id,
                 severity=expl.get("severity", "HIGH"),
@@ -207,6 +247,7 @@ def evaluate_resource(
     resource: Resource,
     cedar_bin: str | None = None,
     selected_rules: list[str] | None = None,
+    no_explain: bool = False,
 ) -> list[Violation]:
     """Evaluate a resource against all applicable rules.
 
@@ -223,7 +264,7 @@ def evaluate_resource(
         if rule.resource_type_match not in resource.resource_type:
             continue
 
-        violation = evaluate_single_rule(resource, rule, cedar_bin)
+        violation = evaluate_single_rule(resource, rule, cedar_bin, no_explain=no_explain)
         if violation is not None:
             violations.append(violation)
 
@@ -234,6 +275,7 @@ def evaluate_resources(
     resources: list[Resource],
     cedar_bin: str | None = None,
     selected_rules: list[str] | None = None,
+    no_explain: bool = False,
 ) -> list[Violation]:
     """Evaluate all resources against all applicable rules.
 
@@ -241,6 +283,6 @@ def evaluate_resources(
     """
     all_violations: list[Violation] = []
     for resource in resources:
-        violations = evaluate_resource(resource, cedar_bin, selected_rules)
+        violations = evaluate_resource(resource, cedar_bin, selected_rules, no_explain=no_explain)
         all_violations.extend(violations)
     return all_violations

@@ -1,0 +1,28 @@
+{
+  "_comment": "Cached AI explanations for demo-repo/broken fixtures. Used by --format text|json during recorded demos so the video never depends on live Bedrock availability/latency. Keyed by 'rule_id:resource_id'. Regenerate with: python -m explain.regenerate_cache",
+  "R1-S3-PUBLIC:DataLakeBucket": {
+    "explanation": "This bucket has no public access block and an ACL that allows public read, so anyone on the internet can list or download its contents.",
+    "suggested_fix": "Enable all four S3 Block Public Access settings and remove the public-read ACL.",
+    "fix_snippet": "PublicAccessBlockConfiguration:\n  BlockPublicAcls: true\n  BlockPublicPolicy: true\n  IgnorePublicAcls: true\n  RestrictPublicBuckets: true"
+  },
+  "R2-IAM-WILDCARD-ACTION:AdminRolePolicy": {
+    "explanation": "This policy's Action is set to '*', granting every AWS API action across every service to anything that assumes this role.",
+    "suggested_fix": "List only the specific actions the workload actually needs, e.g. s3:GetObject and s3:PutObject.",
+    "fix_snippet": "Action:\n  - 's3:GetObject'\n  - 's3:PutObject'"
+  },
+  "R3-IAM-WILDCARD-RESOURCE:DataPipelinePolicy": {
+    "explanation": "The Resource element is '*', so the S3 actions apply to every bucket in the account, not just the ones this ETL pipeline actually owns.",
+    "suggested_fix": "Scope Resource to the specific bucket ARN(s) the pipeline needs to touch.",
+    "fix_snippet": "Resource:\n  - 'arn:aws:s3:::acme-datalake-prod/*'"
+  },
+  "R4-SG-OPEN-INGRESS:DatabaseSecurityGroup": {
+    "explanation": "PostgreSQL (5432) and SSH (22) are both open to 0.0.0.0/0, meaning the database is directly reachable and brute-forceable from anywhere on the internet.",
+    "suggested_fix": "Restrict both ingress rules to a known VPC range or bastion security group instead of 0.0.0.0/0.",
+    "fix_snippet": "CidrIp: '10.0.0.0/16'"
+  },
+  "R5-NO-MFA-CONDITION:SecurityAuditPolicy": {
+    "explanation": "Sensitive IAM actions like CreateUser and AttachRolePolicy are permitted with no MFA condition, so a leaked credential alone is enough to use them.",
+    "suggested_fix": "Require aws:MultiFactorAuthPresent on any policy statement granting sensitive/destructive IAM actions.",
+    "fix_snippet": "Condition:\n  Bool:\n    'aws:MultiFactorAuthPresent': 'true'"
+  }
+}

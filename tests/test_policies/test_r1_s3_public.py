@@ -10,8 +10,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import pytest
-
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 CEDAR_BIN = str(ROOT_DIR / "bin" / ("cedar.exe" if __import__("sys").platform == "win32" else "cedar"))
 SCHEMA_PATH = str(ROOT_DIR / "policies" / "schema.cedarschema.json")

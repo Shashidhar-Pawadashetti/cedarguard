@@ -9,7 +9,6 @@ Reference: docs/03-architecture.md §2.1 and docs/04-data-model-api.md §1
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
