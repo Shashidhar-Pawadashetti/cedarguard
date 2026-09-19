@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  IAM roles and policies — FIXED: least-privilege, scoped resources, MFA required.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+
+Resources:
+  AdminRolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "acme-admin-${Environment}"
+      Description: Emergency break-glass admin policy (scoped)
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ScopedAdminAccess
+            Effect: Allow
+            Action:
+              - "ec2:Describe*"
+              - "s3:ListAllMyBuckets"
+              - "cloudwatch:GetMetricData"
+              - "logs:GetLogEvents"
+            Resource: !Sub "arn:aws:s3:::acme-*-${Environment}/*"
+            Condition:
+              Bool:
+                "aws:MultiFactorAuthPresent": "true"
+
+  AdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "acme-admin-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "sts:AssumeRole"
+            Condition:
+              Bool:
+                "aws:MultiFactorAuthPresent": "true"
+      ManagedPolicyArns:
+        - !Ref AdminRolePolicy
+
+  DataPipelinePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "acme-data-pipeline-${Environment}"
+      Description: Policy for data pipeline ETL jobs (scoped)
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3ScopedAccess
+            Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:PutObject"
+              - "s3:DeleteObject"
+              - "s3:ListBucket"
+            Resource:
+              - !Sub "arn:aws:s3:::acme-datalake-${Environment}"
+              - !Sub "arn:aws:s3:::acme-datalake-${Environment}/*"
+
+  SecurityAuditPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "acme-security-ops-${Environment}"
+      Description: Policy for security team operations (with MFA)
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: IAMManagementWithMFA
+            Effect: Allow
+            Action:
+              - "iam:CreateUser"
+              - "iam:DeleteUser"
+              - "iam:AttachRolePolicy"
+              - "iam:DetachRolePolicy"
+              - "iam:CreateRole"
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:*"
+            Condition:
+              Bool:
+                "aws:MultiFactorAuthPresent": "true"
+
+Outputs:
+  AdminRoleArn:
+    Value: !GetAtt AdminRole.Arn

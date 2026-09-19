@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  IAM roles and policies — BROKEN: overly-permissive policies.
+  This template intentionally contains security misconfigurations for
+  CedarGuard demo purposes.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+
+Resources:
+  # ── R2-IAM-WILDCARD-ACTION violation ───────────────────────────────
+  # This policy grants Action: "*" — full admin access.
+  AdminRolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "acme-admin-${Environment}"
+      Description: Emergency break-glass admin policy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: FullAdminAccess
+            Effect: Allow
+            Action: "*"
+            Resource: !Sub "arn:aws:s3:::acme-*-${Environment}/*"
+
+  AdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "acme-admin-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - !Ref AdminRolePolicy
+
+  # ── R3-IAM-WILDCARD-RESOURCE violation ─────────────────────────────
+  # This policy scopes actions but uses Resource: "*"
+  DataPipelinePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "acme-data-pipeline-${Environment}"
+      Description: Policy for data pipeline ETL jobs
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3FullAccess
+            Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:PutObject"
+              - "s3:DeleteObject"
+              - "s3:ListBucket"
+            Resource: "*"
+
+  # ── R5-NO-MFA-CONDITION violation ──────────────────────────────────
+  # Sensitive IAM actions (iam:CreateUser, iam:AttachRolePolicy) without
+  # requiring MFA.
+  SecurityAuditPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "acme-security-ops-${Environment}"
+      Description: Policy for security team operations
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: IAMManagement
+            Effect: Allow
+            Action:
+              - "iam:CreateUser"
+              - "iam:DeleteUser"
+              - "iam:AttachRolePolicy"
+              - "iam:DetachRolePolicy"
+              - "iam:CreateRole"
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:*"
+
+Outputs:
+  AdminRoleArn:
+    Value: !GetAtt AdminRole.Arn

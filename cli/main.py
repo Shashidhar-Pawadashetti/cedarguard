@@ -9,10 +9,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from engine.evaluator import evaluate_resources
 from engine.irr import ScanResult, Violation
+from parsers.cfn_sam import parse_cfn_file, parse_directory
 
 SEVERITY_WEIGHTS = {
     "CRITICAL": 3,
@@ -22,38 +25,96 @@ SEVERITY_WEIGHTS = {
 }
 
 
-def format_text_output(scan_result: ScanResult) -> str:
+def _supports_unicode() -> bool:
+    """Check if stdout can encode Unicode symbols."""
+    import os
+    if os.environ.get("NO_COLOR"):
+        return False
+    try:
+        encoding = getattr(sys.stdout, "encoding", "") or ""
+        return encoding.lower() in ("utf-8", "utf8", "utf-8-sig")
+    except Exception:
+        return False
+
+
+def format_text_output(scan_result: ScanResult, elapsed: float = 0.0) -> str:
     """Format scan results according to docs/05-ui-ux-spec.md §2."""
+    use_unicode = _supports_unicode()
+
+    # Choose symbols based on terminal capability
+    X_MARK = "\u2716" if use_unicode else "X"
+    CHECK = "\u2713" if use_unicode else "*"
+    DOT = "\u00b7" if use_unicode else "|"
+    HRULE = "\u2500" * 60 if use_unicode else "-" * 60
+
     lines: list[str] = []
-    lines.append("CedarGuard Security Scan Report")
-    lines.append("=" * 60)
-    lines.append(f"Target: {scan_result.target}")
-    lines.append(
-        f"Total Resources Scanned: {scan_result.summary.get('total_resources', 0)}"
-    )
-    lines.append(f"Violations Found:        {scan_result.summary.get('violations', 0)}")
-    lines.append(f"  Critical: {scan_result.summary.get('critical', 0)}")
-    lines.append(f"  High:     {scan_result.summary.get('high', 0)}")
-    lines.append(f"  Medium:   {scan_result.summary.get('medium', 0)}")
-    lines.append("=" * 60)
+
+    total = scan_result.summary.get("total_resources", 0)
+    n_critical = scan_result.summary.get("critical", 0)
+    n_high = scan_result.summary.get("high", 0)
+    n_medium = scan_result.summary.get("medium", 0)
+    n_violations = scan_result.summary.get("violations", 0)
+    n_clean = total - n_violations if total >= n_violations else 0
+
+    # Header
+    lines.append(f"CedarGuard scan {DOT} {scan_result.target} {DOT} {total} resources scanned")
+    lines.append("")
+
+    # Severity summary line
+    parts: list[str] = []
+    if n_critical:
+        parts.append(f"{X_MARK} {n_critical} CRITICAL")
+    if n_high:
+        parts.append(f"{X_MARK} {n_high} HIGH")
+    if n_medium:
+        parts.append(f"{X_MARK} {n_medium} MEDIUM")
+    if n_clean > 0:
+        parts.append(f"{CHECK} {n_clean} clean")
+    if parts:
+        lines.append("  ".join(parts))
+    else:
+        lines.append(f"{CHECK} {total} clean")
+    lines.append("")
 
     if not scan_result.violations:
         lines.append(
-            "\n[PASS] No policy violations detected. IaC configuration is compliant."
+            "[PASS] No policy violations detected. IaC configuration is compliant."
         )
-        return "\n".join(lines)
+        exit_reason = "no violations"
+    else:
+        # Sort violations by severity (CRITICAL first)
+        sorted_violations = sorted(
+            scan_result.violations,
+            key=lambda v: SEVERITY_WEIGHTS.get(v.severity.upper(), 0),
+            reverse=True,
+        )
 
-    for v in scan_result.violations:
-        lines.append(
-            f"\n[{v.severity}] {v.rule_id}: {v.resource_id} ({v.resource_type})"
-        )
-        lines.append(f"  File: {v.file}:{v.line}")
-        lines.append(f"  Why:  {v.explanation}")
-        lines.append(f"  Fix:  {v.suggested_fix}")
-        if v.fix_snippet:
-            lines.append("  Suggested Remediation:")
-            for s_line in v.fix_snippet.strip().splitlines():
-                lines.append(f"    {s_line}")
+        for v in sorted_violations:
+            lines.append(HRULE)
+            lines.append(
+                f"[{v.severity}] {v.rule_id} {DOT} {v.file}:{v.line}"
+            )
+            lines.append(f"  Resource: {v.resource_id} ({v.resource_type})")
+            lines.append("")
+            lines.append(f"  {v.explanation}")
+            lines.append("")
+            lines.append("  Suggested fix:")
+            if v.fix_snippet:
+                for s_line in v.fix_snippet.strip().splitlines():
+                    lines.append(f"  + {s_line}")
+            else:
+                lines.append(f"  {v.suggested_fix}")
+
+        lines.append("")
+        exit_reason = "blocking violations found"
+
+    # Footer
+    lines.append(HRULE)
+    exit_code = 1 if scan_result.violations else 0
+    elapsed_str = f"{elapsed:.1f}s" if elapsed else "< 1s"
+    lines.append(
+        f"Scan complete in {elapsed_str} {DOT} exit code {exit_code} ({exit_reason})"
+    )
 
     return "\n".join(lines)
 
@@ -71,17 +132,48 @@ def run_scan(
     rules: list[str] | None = None,
 ) -> int:
     """Execute scan against IaC target directory or file."""
+    start_time = time.monotonic()
+
     p = Path(target_path)
     if not p.exists():
         print(f"Error: Target path does not exist: {target_path}", file=sys.stderr)
         return 2
 
-    # Scaffolding stub: placeholder scan result
+    # Parse resources
+    try:
+        if p.is_dir():
+            resources = parse_directory(p)
+        else:
+            resources = parse_cfn_file(p)
+    except Exception as e:
+        print(f"Error: Failed to parse target: {e}", file=sys.stderr)
+        return 2
+
+    if not resources:
+        print(f"Warning: No scannable resources found in {target_path}", file=sys.stderr)
+
+    # Evaluate resources against Cedar policies
+    selected_rules = None
+    if rules:
+        # Normalize rule IDs (e.g. "R1" -> "R1-S3-PUBLIC")
+        from engine.evaluator import RULE_REGISTRY
+        rule_map = {}
+        for r in RULE_REGISTRY:
+            rule_map[r.rule_id] = r.rule_id
+            # Also support short form: "R1" matches "R1-S3-PUBLIC"
+            short = r.rule_id.split("-")[0]
+            rule_map[short] = r.rule_id
+        selected_rules = [rule_map.get(r, r) for r in rules]
+
+    violations = evaluate_resources(resources, selected_rules=selected_rules)
+
+    elapsed = time.monotonic() - start_time
+
+    # Build scan result
     scan_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    violations: list[Violation] = []
 
     summary = {
-        "total_resources": 0,
+        "total_resources": len(resources),
         "violations": len(violations),
         "critical": sum(1 for v in violations if v.severity == "CRITICAL"),
         "high": sum(1 for v in violations if v.severity == "HIGH"),
@@ -98,7 +190,7 @@ def run_scan(
     if output_format == "json":
         print(format_json_output(result))
     else:
-        print(format_text_output(result))
+        print(format_text_output(result, elapsed))
 
     threshold = SEVERITY_WEIGHTS.get(fail_on.upper(), 2)
     blocking_violations = [

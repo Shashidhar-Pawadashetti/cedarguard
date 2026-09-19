@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  VPC networking and security groups — FIXED: restricted CIDR ranges.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-0123456789abcdef0
+
+  BastionCidr:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: CIDR for bastion host subnet
+
+Resources:
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS PostgreSQL instances
+      GroupName: !Sub "acme-db-sg-${Environment}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: "10.0.0.0/16"
+          Description: "PostgreSQL from VPC only"
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref BastionCidr
+          Description: "SSH from bastion subnet only"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+          Description: Allow all outbound
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub "acme-db-sg-${Environment}"
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for application tier
+      GroupName: !Sub "acme-app-sg-${Environment}"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "10.0.0.0/16"
+          Description: "HTTPS from internal VPC only"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  DatabaseSecurityGroupId:
+    Value: !GetAtt DatabaseSecurityGroup.GroupId
