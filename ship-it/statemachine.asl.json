@@ -1,0 +1,123 @@
+{
+  "Comment": "CedarGuard Ship It live security audit loop: CloudTrail Event -> Evaluate (Cedar) -> Choice -> Parallel(DynamoDB Audit Log + SNS Alert)",
+  "StartAt": "EvaluateResourceEvent",
+  "States": {
+    "EvaluateResourceEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CedarGuardEvaluatorFunctionArn}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "has_violations.$": "$.Payload.has_violations",
+        "total_violations.$": "$.Payload.total_violations",
+        "account_id.$": "$.Payload.account_id",
+        "resource_id.$": "$.Payload.resource_id",
+        "resource_type.$": "$.Payload.resource_type",
+        "timestamp.$": "$.Payload.timestamp",
+        "violations.$": "$.Payload.violations",
+        "first_dynamodb_item.$": "$.Payload.first_dynamodb_item",
+        "sns_message.$": "$.Payload.sns_message"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "CheckForViolations"
+    },
+    "CheckForViolations": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.has_violations",
+          "BooleanEquals": true,
+          "Next": "ProcessViolations"
+        }
+      ],
+      "Default": "CompliantResource"
+    },
+    "CompliantResource": {
+      "Type": "Pass",
+      "Result": {
+        "status": "COMPLIANT",
+        "message": "Resource evaluation clean. No Cedar policy violations detected."
+      },
+      "End": true
+    },
+    "ProcessViolations": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "RecordAuditLogDynamoDB",
+          "States": {
+            "RecordAuditLogDynamoDB": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:putItem",
+              "Parameters": {
+                "TableName": "${AuditLogTableName}",
+                "Item.$": "$.first_dynamodb_item"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "DynamoDB.ProvisionedThroughputExceededException",
+                    "DynamoDB.InternalServerError"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "PublishSnsSecurityAlert",
+          "States": {
+            "PublishSnsSecurityAlert": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${AlertsTopicArn}",
+                "Subject": "🚨 CedarGuard Security Policy Violation Detected",
+                "Message.$": "$.sns_message"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "SNS.InternalErrorException",
+                    "SNS.ServiceUnavailable"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "Next": "AuditWorkflowComplete"
+    },
+    "AuditWorkflowComplete": {
+      "Type": "Pass",
+      "Result": {
+        "status": "VIOLATION_RECORDED",
+        "message": "Policy violation logged to DynamoDB audit table and alert published to SNS."
+      },
+      "End": true
+    }
+  }
+}

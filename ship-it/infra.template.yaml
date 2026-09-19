@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  CedarGuard Ship It: Live AWS Security Audit Loop.
+  Watches CloudTrail API mutations via EventBridge, invokes Step Functions to
+  evaluate resources against Cedar policies via Lambda, logs findings to DynamoDB,
+  and publishes alerts to SNS.
+  Reference: docs/03-architecture.md §2.6 and docs/04-data-model-api.md §6.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment stage.
+  BedrockModelId:
+    Type: String
+    Default: global.anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: Bedrock Model ID for AI explanation enrichment.
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # SNS Topic for Security Alerts
+  # ---------------------------------------------------------------------------
+  CedarGuardAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'cedarguard-alerts-${Environment}'
+      DisplayName: 'CedarGuard Security Alerts'
+
+  # ---------------------------------------------------------------------------
+  # DynamoDB Audit Log Table
+  # ---------------------------------------------------------------------------
+  CedarGuardAuditLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'cedarguard-audit-log-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: App
+          Value: CedarGuard
+
+  # ---------------------------------------------------------------------------
+  # Lambda Evaluator Function
+  # ---------------------------------------------------------------------------
+  CedarGuardEvaluatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'cedarguard-evaluator-${Environment}'
+      CodeUri: ../
+      Handler: ship-it.lambda_handler.evaluate_handler
+      Runtime: python3.11
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          AUDIT_LOG_TABLE: !Ref CedarGuardAuditLogTable
+          ALERTS_TOPIC_ARN: !Ref CedarGuardAlertsTopic
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CedarGuardAuditLogTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt CedarGuardAlertsTopic.TopicName
+        - Statement:
+            - Sid: BedrockInvokePolicy
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+            - Sid: ReadOnlyResourceDescribe
+              Effect: Allow
+              Action:
+                - ec2:DescribeSecurityGroups
+                - s3:GetBucketAcl
+                - s3:GetBucketPolicy
+                - s3:GetPublicAccessBlock
+                - iam:GetPolicy
+                - iam:GetPolicyVersion
+                - iam:GetRolePolicy
+              Resource: '*'
+
+  # ---------------------------------------------------------------------------
+  # Step Functions State Machine Execution Role
+  # ---------------------------------------------------------------------------
+  CedarGuardStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CedarGuardStepFunctionsExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt CedarGuardEvaluatorFunction.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt CedarGuardAuditLogTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref CedarGuardAlertsTopic
+
+  # ---------------------------------------------------------------------------
+  # Step Functions State Machine
+  # ---------------------------------------------------------------------------
+  CedarGuardStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub 'CedarGuardAuditWorkflow-${Environment}'
+      RoleArn: !GetAtt CedarGuardStateMachineRole.Arn
+      DefinitionSubstitutions:
+        CedarGuardEvaluatorFunctionArn: !GetAtt CedarGuardEvaluatorFunction.Arn
+        AuditLogTableName: !Ref CedarGuardAuditLogTable
+        AlertsTopicArn: !Ref CedarGuardAlertsTopic
+      DefinitionUri: ./statemachine.asl.json
+
+  # ---------------------------------------------------------------------------
+  # EventBridge Rule: Match CloudTrail API mutations
+  # ---------------------------------------------------------------------------
+  CedarGuardEventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartStateMachineExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref CedarGuardStateMachine
+
+  CedarGuardCloudTrailRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'cedarguard-cloudtrail-rule-${Environment}'
+      Description: 'Routes CloudTrail IaC/Resource API changes to CedarGuard Step Functions'
+      EventPattern:
+        source:
+          - aws.ec2
+          - aws.s3
+          - aws.iam
+        detail-type:
+          - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+            - s3.amazonaws.com
+            - iam.amazonaws.com
+          eventName:
+            # EC2 Security Group mutation (R4)
+            - AuthorizeSecurityGroupIngress
+            - RevokeSecurityGroupIngress
+            # S3 Bucket mutations (R1)
+            - PutBucketAcl
+            - PutPublicAccessBlock
+            # IAM Policy mutations (R2, R3, R5)
+            - CreatePolicy
+            - CreatePolicyVersion
+            - PutRolePolicy
+            - PutUserPolicy
+      State: ENABLED
+      Targets:
+        - Arn: !Ref CedarGuardStateMachine
+          Id: CedarGuardStepFunctionsTarget
+          RoleArn: !GetAtt CedarGuardEventBridgeRole.Arn
+
+Outputs:
+  AlertsTopicArn:
+    Description: SNS Topic for CedarGuard security alerts
+    Value: !Ref CedarGuardAlertsTopic
+  AuditLogTableName:
+    Description: DynamoDB table name for security findings
+    Value: !Ref CedarGuardAuditLogTable
+  StateMachineArn:
+    Description: Step Functions state machine ARN
+    Value: !Ref CedarGuardStateMachine
+  EvaluatorFunctionArn:
+    Description: Lambda evaluator function ARN
+    Value: !GetAtt CedarGuardEvaluatorFunction.Arn

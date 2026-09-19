@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from engine.cedar_engine import CedarEngine, SubprocessCedarEngine, get_cedar_engine
 from engine.irr import Resource, Violation
 from explain.bedrock_client import get_ai_explanation
 from explain.templates import get_explanation
@@ -147,100 +148,60 @@ def evaluate_single_rule(
     rule: RuleSpec,
     cedar_bin: str | None = None,
     no_explain: bool = False,
+    engine: CedarEngine | None = None,
 ) -> Violation | None:
     """Evaluate a single IRR resource against one Cedar rule.
 
     Returns a Violation if the rule forbids the configuration, None if allowed.
     """
-    cedar_exec = cedar_bin or resolve_cedar_bin()
+    active_engine = engine or (SubprocessCedarEngine(cedar_bin) if cedar_bin else get_cedar_engine())
     policies_dir = _get_policies_dir()
 
     schema_path = str(policies_dir / "schema.cedarschema.json")
-    # We need both the permit default and the specific rule policy
-    # Cedar CLI can accept a directory, but we want to be explicit
-    # Create a temp file combining both policies
     permit_policy = (policies_dir / "permit_default.cedar").read_text(encoding="utf-8")
     rule_policy = (policies_dir / rule.policy_file).read_text(encoding="utf-8")
     combined_policy = permit_policy + "\n" + rule_policy
 
     entities = _build_cedar_entities(resource, rule.entity_type)
 
-    # Write temp files
-    entity_path = None
-    policy_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, encoding="utf-8"
-        ) as ef:
-            json.dump(entities, ef)
-            entity_path = ef.name
+    output = active_engine.authorize(
+        principal='CedarGuard::Scanner::"scanner"',
+        action=f'CedarGuard::Action::"{rule.action}"',
+        resource=f'CedarGuard::{rule.entity_type}::"{resource.resource_id}"',
+        entities=entities,
+        schema_path=schema_path,
+        policy_content=combined_policy,
+    )
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".cedar", delete=False, encoding="utf-8"
-        ) as pf:
-            pf.write(combined_policy)
-            policy_path = pf.name
-
-        cmd = [
-            cedar_exec,
-            "authorize",
-            "--schema",
-            schema_path,
-            "--schema-format",
-            "json",
-            "--policies",
-            policy_path,
-            "--entities",
-            entity_path,
-            "--principal",
-            'CedarGuard::Scanner::"scanner"',
-            "--action",
-            f'CedarGuard::Action::"{rule.action}"',
-            "--resource",
-            f'CedarGuard::{rule.entity_type}::"{resource.resource_id}"',
-            "-v",
-        ]
-
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        output = res.stdout + res.stderr
-
-        # DENY means the forbid policy fired → violation found
-        if "DENY" in output:
-            if no_explain:
-                # Fast path: skip Bedrock/cache entirely, template only.
-                # Cedar's decision (pass/fail) never depends on this branch —
-                # only the explanation text does (FR3, NFR6).
-                expl = get_explanation(rule.rule_id)
-            else:
-                cache_key = f"{rule.rule_id}:{resource.resource_id}"
-                expl = get_ai_explanation(
-                    rule_id=rule.rule_id,
-                    resource_id=resource.resource_id,
-                    resource_type=resource.resource_type,
-                    raw_snippet=resource.raw_snippet,
-                    demo_cache=_load_demo_cache(),
-                    cache_key=cache_key,
-                )
-            return Violation(
+    # DENY means the forbid policy fired → violation found
+    if "DENY" in output:
+        if no_explain:
+            # Fast path: skip Bedrock/cache entirely, template only.
+            # Cedar's decision (pass/fail) never depends on this branch —
+            # only the explanation text does (FR3, NFR6).
+            expl = get_explanation(rule.rule_id)
+        else:
+            cache_key = f"{rule.rule_id}:{resource.resource_id}"
+            expl = get_ai_explanation(
                 rule_id=rule.rule_id,
-                severity=expl.get("severity", "HIGH"),
                 resource_id=resource.resource_id,
                 resource_type=resource.resource_type,
-                file=resource.source_file,
-                line=resource.source_line,
-                explanation=expl.get("explanation", ""),
-                suggested_fix=expl.get("suggested_fix", ""),
-                fix_snippet=expl.get("fix_snippet", ""),
+                raw_snippet=resource.raw_snippet,
+                demo_cache=_load_demo_cache(),
+                cache_key=cache_key,
             )
-        return None
-
-    finally:
-        for path in (entity_path, policy_path):
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+        return Violation(
+            rule_id=rule.rule_id,
+            severity=expl.get("severity", "HIGH"),
+            resource_id=resource.resource_id,
+            resource_type=resource.resource_type,
+            file=resource.source_file,
+            line=resource.source_line,
+            explanation=expl.get("explanation", ""),
+            suggested_fix=expl.get("suggested_fix", ""),
+            fix_snippet=expl.get("fix_snippet", ""),
+        )
+    return None
 
 
 def evaluate_resource(
@@ -248,6 +209,7 @@ def evaluate_resource(
     cedar_bin: str | None = None,
     selected_rules: list[str] | None = None,
     no_explain: bool = False,
+    engine: CedarEngine | None = None,
 ) -> list[Violation]:
     """Evaluate a resource against all applicable rules.
 
@@ -264,7 +226,9 @@ def evaluate_resource(
         if rule.resource_type_match not in resource.resource_type:
             continue
 
-        violation = evaluate_single_rule(resource, rule, cedar_bin, no_explain=no_explain)
+        violation = evaluate_single_rule(
+            resource, rule, cedar_bin=cedar_bin, no_explain=no_explain, engine=engine
+        )
         if violation is not None:
             violations.append(violation)
 
@@ -276,6 +240,7 @@ def evaluate_resources(
     cedar_bin: str | None = None,
     selected_rules: list[str] | None = None,
     no_explain: bool = False,
+    engine: CedarEngine | None = None,
 ) -> list[Violation]:
     """Evaluate all resources against all applicable rules.
 
@@ -283,6 +248,12 @@ def evaluate_resources(
     """
     all_violations: list[Violation] = []
     for resource in resources:
-        violations = evaluate_resource(resource, cedar_bin, selected_rules, no_explain=no_explain)
+        violations = evaluate_resource(
+            resource,
+            cedar_bin=cedar_bin,
+            selected_rules=selected_rules,
+            no_explain=no_explain,
+            engine=engine,
+        )
         all_violations.extend(violations)
     return all_violations

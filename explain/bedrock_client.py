@@ -25,7 +25,7 @@ from explain.templates import get_explanation
 # block synchronously if it risks timing out, and the same discipline keeps
 # the local CLI fast even with --no-explain unset.
 _BEDROCK_TIMEOUT_SECONDS = 4
-_DEFAULT_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
+_DEFAULT_MODEL_ID = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 _PROMPT_TEMPLATE = """You are a security reviewer. A policy engine flagged this \
 infrastructure-as-code resource as a violation.

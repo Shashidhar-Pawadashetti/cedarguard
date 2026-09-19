@@ -1,0 +1,31 @@
+# CedarGuard PR Security Guardrail
+# Automatically scans IaC templates on pull requests and reports new policy violations.
+# Reference: docs/02-requirements.md FR4, docs/06-engineering-rules.md §4
+
+name: CedarGuard
+
+on:
+  pull_request:
+    paths:
+      - '**.yaml'
+      - '**.yml'
+      - '**.json'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run CedarGuard
+        uses: ./ci/github_action
+        with:
+          path: .
+          fail-on: high
+          github-token: ${{ secrets.GITHUB_TOKEN }}
