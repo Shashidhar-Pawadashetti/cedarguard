@@ -95,10 +95,13 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# 2. Run the test suite
+# 2. Fetch the native Windows Cedar CLI binary
+.\scripts\fetch_cedar_windows.ps1
+
+# 3. Run the test suite (95 tests)
 python -m pytest -q
 
-# 3. Run local scans
+# 4. Run local scans
 python -m cli.main scan ./demo-repo/broken
 python -m cli.main scan ./demo-repo/fixed
 python -m cli.main audit-log
