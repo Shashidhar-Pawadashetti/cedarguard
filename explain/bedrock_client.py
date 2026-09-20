@@ -48,12 +48,23 @@ def _get_bedrock_client():
     """Lazily construct a boto3 bedrock-runtime client, or return None if unavailable."""
     try:
         import boto3
+        from botocore.config import Config
     except ImportError:
         return None
 
     region = os.environ.get("AWS_REGION", "us-east-1")
     try:
-        return boto3.client("bedrock-runtime", region_name=region)
+        # Explicit timeout budget -- without this, botocore's default is 60s,
+        # which defeats the whole point of _BEDROCK_TIMEOUT_SECONDS (NFR6:
+        # a live-audit Lambda must not block synchronously if it risks
+        # timing out). retries=0 for the same reason: a single retry at the
+        # default backoff could itself exceed the Lambda's own timeout.
+        config = Config(
+            connect_timeout=2,
+            read_timeout=_BEDROCK_TIMEOUT_SECONDS,
+            retries={"max_attempts": 0},
+        )
+        return boto3.client("bedrock-runtime", region_name=region, config=config)
     except Exception:
         # No credentials configured, no AWS config file, etc. — this is an
         # expected/normal state for the Build It track (NFR2: zero required

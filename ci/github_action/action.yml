@@ -14,9 +14,9 @@ inputs:
     description: 'GitHub token for posting PR comments (usually secrets.GITHUB_TOKEN)'
     required: true
   cedar-cli-version:
-    description: 'Pinned cedar-policy-cli version to install'
+    description: 'Pinned cedar-policy-cli version to install (prebuilt Linux x86_64 release)'
     required: false
-    default: '4.8.2'
+    default: '4.12.0'
   compare-to-base:
     description: 'On pull_request events, only report violations new vs. the base branch'
     required: false
@@ -34,27 +34,31 @@ runs:
       shell: bash
       run: python -m pip install -r requirements.txt
 
-    # Cache the Cedar CLI cargo-install between runs so PRs don't pay a
-    # multi-minute Rust compile cost on every push.
+    # Cedar publishes prebuilt Linux x86_64 binaries on GitHub releases, so
+    # CI installs in ~2 seconds instead of paying a multi-minute Rust
+    # compile via `cargo install` on every cache miss. Cached across runs
+    # regardless, so a version bump only pays this cost once.
     - name: Cache Cedar CLI binary
       id: cedar-cache
       uses: actions/cache@v4
       with:
-        path: ~/.cargo/bin/cedar
-        key: cedar-cli-${{ inputs.cedar-cli-version }}-${{ runner.os }}
+        path: ~/.local/bin/cedar
+        key: cedar-cli-prebuilt-${{ inputs.cedar-cli-version }}-${{ runner.os }}
 
-    - name: Install Rust toolchain
-      if: steps.cedar-cache.outputs.cache-hit != 'true'
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Install Cedar CLI (cedar-policy-cli)
+    - name: Install Cedar CLI (prebuilt binary)
       if: steps.cedar-cache.outputs.cache-hit != 'true'
       shell: bash
-      run: cargo install cedar-policy-cli --version ${{ inputs.cedar-cli-version }} --locked
+      run: |
+        mkdir -p "$HOME/.local/bin"
+        curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/cedar.tar.xz \
+          "https://github.com/cedar-policy/cedar/releases/download/cedar-policy-cli-v${{ inputs.cedar-cli-version }}/cedar-policy-cli-x86_64-unknown-linux-gnu.tar.xz"
+        tar -xJf /tmp/cedar.tar.xz -C /tmp
+        cp /tmp/cedar-policy-cli-x86_64-unknown-linux-gnu/cedar "$HOME/.local/bin/cedar"
+        chmod +x "$HOME/.local/bin/cedar"
 
     - name: Expose cedar on PATH
       shell: bash
-      run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Verify Cedar CLI
       shell: bash

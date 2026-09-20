@@ -7,6 +7,7 @@ and CloudFormation/SAM infrastructure template validity.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -119,7 +120,15 @@ class TestStepFunctionsDefinition:
         assert len(pv["Branches"]) == 2
 
         branch_states_0 = pv["Branches"][0]["States"]
-        assert "RecordAuditLogDynamoDB" in branch_states_0
+        assert "RecordAllViolationsDynamoDB" in branch_states_0
+        # DynamoDB writes now iterate over ALL violations for a resource via
+        # a Map state (not just the first), since a single resource can trip
+        # more than one rule (e.g. an IAM policy with both wildcard action
+        # and wildcard resource) -- see docs/03-architecture.md §2.6.
+        map_state = branch_states_0["RecordAllViolationsDynamoDB"]
+        assert map_state["Type"] == "Map"
+        assert map_state["ItemsPath"] == "$.all_dynamodb_items"
+        assert "RecordAuditLogDynamoDB" in map_state["Iterator"]["States"]
 
         branch_states_1 = pv["Branches"][1]["States"]
         assert "PublishSnsSecurityAlert" in branch_states_1
@@ -155,3 +164,31 @@ class TestSamInfrastructureTemplate:
 
         assert "CedarGuardCloudTrailRule" in resources
         assert resources["CedarGuardCloudTrailRule"]["Type"] == "AWS::Events::Rule"
+
+    def test_cedar_cli_layer_declared_and_attached_to_evaluator(self):
+        """Without this layer, LambdaCedarEngine's default /opt/bin/cedar
+        never exists at runtime and every live evaluation fails on the
+        Cedar binary lookup -- this is a functional requirement, not a
+        nice-to-have. See engine/cedar_engine.py LambdaCedarEngine and
+        scripts/fetch_cedar_layer.sh.
+        """
+        tmpl_path = ROOT_DIR / "ship-it" / "infra.template.yaml"
+        try:
+            from cfn_flip import load_yaml
+            data = load_yaml(tmpl_path.read_text(encoding="utf-8"))
+        except ImportError:
+            data = yaml.safe_load(tmpl_path.read_text(encoding="utf-8"))
+        resources = data["Resources"]
+
+        assert "CedarCliLayer" in resources
+        layer = resources["CedarCliLayer"]
+        assert layer["Type"] == "AWS::Serverless::LayerVersion"
+        assert "python3.11" in layer["Properties"]["CompatibleRuntimes"]
+
+        fn_props = resources["CedarGuardEvaluatorFunction"]["Properties"]
+        assert "Layers" in fn_props and len(fn_props["Layers"]) >= 1
+
+    def test_fetch_cedar_layer_script_exists_and_is_executable(self):
+        script_path = ROOT_DIR / "scripts" / "fetch_cedar_layer.sh"
+        assert script_path.exists()
+        assert os.access(script_path, os.X_OK)

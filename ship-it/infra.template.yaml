@@ -53,6 +53,28 @@ Resources:
           Value: CedarGuard
 
   # ---------------------------------------------------------------------------
+  # Cedar CLI Lambda Layer
+  # ---------------------------------------------------------------------------
+  # Content is NOT committed to git -- run scripts/fetch_cedar_layer.sh before
+  # `sam build` to populate ship-it/layers/cedar-cli/bin/cedar. Lambda mounts
+  # layer content under /opt, so a layer with bin/cedar lands at /opt/bin/cedar
+  # and is automatically on PATH for every Lambda runtime. This is exactly the
+  # path LambdaCedarEngine (engine/cedar_engine.py) checks by default, and is
+  # what makes the SAME Cedar policies runnable both locally and in Lambda
+  # (ADR-2, docs/03-architecture.md §2.6).
+  CedarCliLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub 'cedarguard-cedar-cli-${Environment}'
+      Description: 'Prebuilt cedar-policy-cli binary (Linux x86_64), fetched via scripts/fetch_cedar_layer.sh'
+      ContentUri: layers/cedar-cli/
+      CompatibleRuntimes:
+        - python3.11
+      CompatibleArchitectures:
+        - x86_64
+      RetentionPolicy: Delete
+
+  # ---------------------------------------------------------------------------
   # Lambda Evaluator Function
   # ---------------------------------------------------------------------------
   CedarGuardEvaluatorFunction:
@@ -62,8 +84,12 @@ Resources:
       CodeUri: ../
       Handler: ship-it.lambda_handler.evaluate_handler
       Runtime: python3.11
+      Architectures:
+        - x86_64
       Timeout: 30
       MemorySize: 512
+      Layers:
+        - !Ref CedarCliLayer
       Environment:
         Variables:
           AUDIT_LOG_TABLE: !Ref CedarGuardAuditLogTable

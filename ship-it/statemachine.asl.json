@@ -58,26 +58,49 @@
       "Type": "Parallel",
       "Branches": [
         {
-          "StartAt": "RecordAuditLogDynamoDB",
+          "StartAt": "RecordAllViolationsDynamoDB",
           "States": {
-            "RecordAuditLogDynamoDB": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::dynamodb:putItem",
-              "Parameters": {
-                "TableName": "${AuditLogTableName}",
-                "Item.$": "$.first_dynamodb_item"
-              },
-              "Retry": [
-                {
-                  "ErrorEquals": [
-                    "DynamoDB.ProvisionedThroughputExceededException",
-                    "DynamoDB.InternalServerError"
-                  ],
-                  "IntervalSeconds": 2,
-                  "MaxAttempts": 3,
-                  "BackoffRate": 2.0
+            "RecordAllViolationsDynamoDB": {
+              "Type": "Map",
+              "ItemsPath": "$.all_dynamodb_items",
+              "MaxConcurrency": 5,
+              "Iterator": {
+                "StartAt": "RecordAuditLogDynamoDB",
+                "States": {
+                  "RecordAuditLogDynamoDB": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::dynamodb:putItem",
+                    "Parameters": {
+                      "TableName": "${AuditLogTableName}",
+                      "Item.$": "$"
+                    },
+                    "Retry": [
+                      {
+                        "ErrorEquals": [
+                          "DynamoDB.ProvisionedThroughputExceededException",
+                          "DynamoDB.InternalServerError"
+                        ],
+                        "IntervalSeconds": 2,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2.0
+                      }
+                    ],
+                    "Catch": [
+                      {
+                        "ErrorEquals": ["States.ALL"],
+                        "ResultPath": "$.error",
+                        "Next": "DynamoDbWriteFailed"
+                      }
+                    ],
+                    "End": true
+                  },
+                  "DynamoDbWriteFailed": {
+                    "Type": "Pass",
+                    "Comment": "A DynamoDB write failure must not fail the whole ProcessViolations Parallel state and suppress the SNS alert branch -- the alert is more time-critical than the audit-log write.",
+                    "End": true
+                  }
                 }
-              ],
+              },
               "End": true
             }
           }
@@ -104,6 +127,18 @@
                   "BackoffRate": 2.0
                 }
               ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.error",
+                  "Next": "SnsPublishFailed"
+                }
+              ],
+              "End": true
+            },
+            "SnsPublishFailed": {
+              "Type": "Pass",
+              "Comment": "An SNS failure must not fail the whole ProcessViolations Parallel state and suppress the DynamoDB audit-log write -- the record should persist even if the alert didn't send.",
               "End": true
             }
           }

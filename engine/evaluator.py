@@ -8,10 +8,6 @@ Reference: docs/03-architecture.md §2.2 and docs/04-data-model-api.md §2-3
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -71,18 +67,6 @@ RULE_REGISTRY: list[RuleSpec] = [
         policy_file="r5_no_mfa_condition.cedar",
     ),
 ]
-
-
-def resolve_cedar_bin() -> str:
-    """Locate the cedar binary in the project bin/ or PATH."""
-    root_dir = Path(__file__).resolve().parent.parent
-    local_bin = root_dir / "bin" / ("cedar.exe" if sys.platform == "win32" else "cedar")
-    if local_bin.is_file():
-        return str(local_bin)
-    env_bin = os.environ.get("CEDAR_BIN_PATH")
-    if env_bin and Path(env_bin).is_file():
-        return env_bin
-    return "cedar"
 
 
 def _get_policies_dir() -> Path:

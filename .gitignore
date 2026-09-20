@@ -34,6 +34,7 @@ htmlcov/
 
 # Binaries & local tools
 bin/
+ship-it/layers/*/bin/
 *.exe
 *.zip
 

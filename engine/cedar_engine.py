@@ -50,8 +50,12 @@ class SubprocessCedarEngine(CedarEngine):
         if self._cedar_bin and Path(self._cedar_bin).exists():
             return self._cedar_bin
 
-        # Check environment variable
-        env_bin = os.environ.get("CEDAR_BIN")
+        # Check environment variable. CEDAR_BIN is the canonical name used
+        # by this class; CEDAR_BIN_PATH is accepted as an alias since it's
+        # the name documented in .env.example / docs/04-data-model-api.md
+        # (predates this CedarEngine abstraction) -- both are honored so
+        # neither the docs nor any existing deployment need to change.
+        env_bin = os.environ.get("CEDAR_BIN") or os.environ.get("CEDAR_BIN_PATH")
         if env_bin and Path(env_bin).exists():
             return env_bin
 
@@ -156,8 +160,8 @@ class LambdaCedarEngine(CedarEngine):
             bin_path = None
             if Path(self.layer_bin_path).exists():
                 bin_path = self.layer_bin_path
-            elif os.environ.get("CEDAR_BIN"):
-                bin_path = os.environ.get("CEDAR_BIN")
+            elif os.environ.get("CEDAR_BIN") or os.environ.get("CEDAR_BIN_PATH"):
+                bin_path = os.environ.get("CEDAR_BIN") or os.environ.get("CEDAR_BIN_PATH")
             self._subprocess_engine = SubprocessCedarEngine(bin_path)
         return self._subprocess_engine
 
