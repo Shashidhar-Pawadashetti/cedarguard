@@ -188,7 +188,13 @@ class TestSamInfrastructureTemplate:
         fn_props = resources["CedarGuardEvaluatorFunction"]["Properties"]
         assert "Layers" in fn_props and len(fn_props["Layers"]) >= 1
 
-    def test_fetch_cedar_layer_script_exists_and_is_executable(self):
+    def test_fetch_cedar_layer_script_exists_and_is_shell_script(self):
+        # Not checking os.X_OK: Windows checkouts (git doesn't reliably
+        # preserve the Unix executable bit across OSes/clone methods) would
+        # fail this even though `bash scripts/fetch_cedar_layer.sh` runs
+        # fine regardless of the bit. Content + shebang is the meaningful
+        # check; contributors on Windows can still run it via `bash`.
         script_path = ROOT_DIR / "scripts" / "fetch_cedar_layer.sh"
         assert script_path.exists()
-        assert os.access(script_path, os.X_OK)
+        content = script_path.read_text(encoding="utf-8")
+        assert content.startswith("#!/usr/bin/env bash")
