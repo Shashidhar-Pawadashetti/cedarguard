@@ -153,10 +153,10 @@ Resources:
   # Step Functions State Machine
   # ---------------------------------------------------------------------------
   CedarGuardStateMachine:
-    Type: AWS::StepFunctions::StateMachine
+    Type: AWS::Serverless::StateMachine
     Properties:
-      StateMachineName: !Sub 'CedarGuardAuditWorkflow-${Environment}'
-      RoleArn: !GetAtt CedarGuardStateMachineRole.Arn
+      Name: !Sub 'CedarGuardAuditWorkflow-${Environment}'
+      Role: !GetAtt CedarGuardStateMachineRole.Arn
       DefinitionSubstitutions:
         CedarGuardEvaluatorFunctionArn: !GetAtt CedarGuardEvaluatorFunction.Arn
         AuditLogTableName: !Ref CedarGuardAuditLogTable

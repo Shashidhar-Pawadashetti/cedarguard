@@ -160,7 +160,7 @@ class TestSamInfrastructureTemplate:
         assert resources["CedarGuardEvaluatorFunction"]["Type"] == "AWS::Serverless::Function"
 
         assert "CedarGuardStateMachine" in resources
-        assert resources["CedarGuardStateMachine"]["Type"] == "AWS::StepFunctions::StateMachine"
+        assert resources["CedarGuardStateMachine"]["Type"] == "AWS::Serverless::StateMachine"
 
         assert "CedarGuardCloudTrailRule" in resources
         assert resources["CedarGuardCloudTrailRule"]["Type"] == "AWS::Events::Rule"
